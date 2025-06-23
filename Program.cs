@@ -3,10 +3,13 @@ using System.Text.Json;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
 
-var userService = await UserService.CreateAsync();
-var emailService = await EmailService.CreateAsync();
+var userService = new UserService(new MessageBus("UserService"));
+var emailService = new EmailService(new MessageBus("EmailService"));
+var client = new MessageBus("Client");
 
-var client = await MessageBus.CreateAsync("Client");
+await userService.InitialiseAsync();
+await emailService.InitialiseAsync();
+await client.InitailiseAsync();
 
 await client.SendAsync(new CreateUserCommand("John Doe", "john.doe@example.com"));
 
@@ -28,82 +31,75 @@ public interface IEvent : IMessage
 {
 }
 
-public class MessageBus : IAsyncDisposable
+public class MessageBus(
+    string _serviceName, 
+    string _connectionString = "amqp://guest:guest@localhost:5672" ) 
+    : IAsyncDisposable
 {
     private IConnection _connection;
     private IChannel _channel;
     private string _queueName;
     private readonly Dictionary<Type, List<Func<object, Task>>> _handlers = new();
-
-    private MessageBus()
-    {
-    }
-
-    public static async Task<MessageBus> CreateAsync(
-        string serviceName,
-        string connectionString = "amqp://guest:guest@localhost:5672")
-    {
-        var bus = new MessageBus();
-        await bus.InitailiseAsync(serviceName, connectionString);
-        return bus;
-    }
     
-    private async Task InitailiseAsync(string serviceName, string connectionString)
+    public async Task InitailiseAsync()
     {
         var factory = new ConnectionFactory
         {
-            Uri = new Uri(connectionString),
-            ClientProvidedName = serviceName
+            Uri = new Uri(_connectionString),
+            ClientProvidedName = _serviceName
         };
 
         _connection = await factory.CreateConnectionAsync();
         _channel = await _connection.CreateChannelAsync();
-        _queueName = $"{serviceName}.queue";
+        _queueName = $"{_serviceName}.queue";
         
         await _channel.QueueDeclareAsync(_queueName, true, false, false);
 
         await SetupConsumerAsync();
     }
 
-    public async Task SendAsync<T>(T message) where T : IMessage
+    public async Task SendAsync<TMessage>(TMessage message) where TMessage : IMessage
     {
-        var exchangeName = typeof(T).Name;
+        var exchangeName = typeof(TMessage).Name;
         
         await _channel.ExchangeDeclareAsync(exchangeName, ExchangeType.Fanout, true);
         var messageBody = JsonSerializer.Serialize(message);
         var body = Encoding.UTF8.GetBytes(messageBody);
         var props = new BasicProperties
         {
-            Type = typeof(T).Name,
+            Type = typeof(TMessage).Name,
         };
 
         await _channel.BasicPublishAsync(exchangeName, "", true, props, body);
     }
     
-    public async Task SendCommandAsync<T>(T command) where T : ICommand
+    public async Task SendCommandAsync<TCommand>(TCommand command) where TCommand : ICommand
         => await SendAsync(command);
     
-    public async Task PublishEventAsync<T>(T @event) where T : IEvent
+    public async Task PublishEventAsync<TEvent>(TEvent @event) where TEvent : IEvent
         => await SendAsync(@event);
 
-    public async Task SubscribeAsync<T>(Func<T, Task> handler) where T : IMessage
+    public void Subscribe<TMessage>(Func<TMessage, Task> handler) where TMessage : IMessage
     {
-        var exchangeName = typeof(T).Name;
-        
+        /*
+        var exchangeName = typeof(TMessage).Name;
         await _channel.ExchangeDeclareAsync(exchangeName, ExchangeType.Fanout, true);
         await _channel.QueueBindAsync(_queueName, exchangeName, "");
+        */
+
+        var messageType = typeof(TMessage);
         
-        if(!_handlers.ContainsKey(typeof(T)))
-            _handlers.Add(typeof(T), new List<Func<object, Task>>());
+        if(!_handlers.ContainsKey(messageType))
+            _handlers.Add(messageType, new List<Func<object, Task>>());
         
-        _handlers[typeof(T)].Add(async (message) => await handler((T)message));
+        _handlers[messageType].Add(async (message) => await handler((TMessage)message));
     }
     
-    public async Task SubscribeToCommandAsync<T>(Func<T, Task> handler) where T : ICommand
-        => await SubscribeAsync(handler);
+    public void SubscribeToCommand<TCommand>(Func<TCommand, Task> handler) where TCommand : ICommand
+        => Subscribe(handler);
     
-    public async Task SubscribeToEventAsync<T>(Func<T, Task> handler) where T : IEvent
-        => await SubscribeAsync(handler);
+    public void SubscribeToEvent<TEvent>(Func<TEvent, Task> handler) where TEvent : IEvent
+        => Subscribe(handler);
     
     private async Task SetupConsumerAsync()
     {
@@ -158,31 +154,23 @@ public class MessageBus : IAsyncDisposable
 }
 
 public record CreateUserCommand(string Name, string Email) : ICommand;
-
 public record UserCreatedEvent(Guid UserId, string Name, string Email) : IEvent;
 public record OrderPlacedEvent(Guid OrderId, Guid UserId, decimal Amount) : IEvent;
 
 public class UserService : IAsyncDisposable
 {
-    private MessageBus _bus;
+    private readonly MessageBus _bus;
 
-    private UserService()
+    public UserService(MessageBus bus)
     {
+        _bus = bus;
+        _bus.Subscribe<CreateUserCommand>(HandleCreateUser);
+        _bus.Subscribe<OrderPlacedEvent>(HandleOrderPlaced);
     }
 
-    public static async Task<UserService> CreateAsync()
+    public async Task InitialiseAsync()
     {
-        var service = new UserService();
-        await service.InitialiseAsync();
-        return service;
-    }
-
-    private async Task InitialiseAsync()
-    {
-        _bus = await MessageBus.CreateAsync("UserService");
-
-        await _bus.SubscribeAsync<CreateUserCommand>(HandleCreateUser);
-        await _bus.SubscribeAsync<OrderPlacedEvent>(HandleOrderPlaced);
+        await _bus.InitailiseAsync();
     }
 
     private async Task HandleCreateUser(CreateUserCommand command)
@@ -210,23 +198,16 @@ public class EmailService : IAsyncDisposable
 {
     private MessageBus _bus;
 
-    private EmailService()
+    public EmailService(MessageBus bus)
     {
+        _bus = bus;
+        _bus.Subscribe<CreateUserCommand>(HandleCreateUser);
+        _bus.Subscribe<UserCreatedEvent>(SendWelcomeEmail);
     }
 
-    public static async Task<EmailService> CreateAsync()
+    public async Task InitialiseAsync()
     {
-        var service = new EmailService();
-        await service.InitialiseAsync();
-        return service;
-    }
-
-    private async Task InitialiseAsync()
-    {
-        _bus = await MessageBus.CreateAsync("EmailService");
-
-        await _bus.SubscribeAsync<CreateUserCommand>(HandleCreateUser);
-        await _bus.SubscribeAsync<UserCreatedEvent>(SendWelcomeEmail);
+        await _bus.InitailiseAsync();
     }
 
     private async Task HandleCreateUser(CreateUserCommand command)
