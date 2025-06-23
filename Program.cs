@@ -39,7 +39,8 @@ public class MessageBus(
     private IConnection _connection;
     private IChannel _channel;
     private string _queueName;
-    private readonly Dictionary<Type, List<Func<object, Task>>> _handlers = new();
+    private readonly List<Type> _messageTypes = new();
+    private readonly Dictionary<string, List<Func<object, Task>>> _handlers = new();
     
     public async Task InitailiseAsync()
     {
@@ -55,9 +56,9 @@ public class MessageBus(
         
         await _channel.QueueDeclareAsync(_queueName, true, false, false);
         
-        foreach (var type in _handlers.Keys)
+        foreach (var typeName in _handlers.Keys)
         {
-            var exchangeName = type.Name;
+            var exchangeName = typeName;
             await _channel.ExchangeDeclareAsync(exchangeName, ExchangeType.Fanout, true);
             await _channel.QueueBindAsync(_queueName, exchangeName, "");
         }
@@ -89,11 +90,15 @@ public class MessageBus(
     public void Subscribe<TMessage>(Func<TMessage, Task> handler) where TMessage : IMessage
     {
         var messageType = typeof(TMessage);
+        var messageTypeName = messageType.Name;
         
-        if(!_handlers.ContainsKey(messageType))
-            _handlers.Add(messageType, new List<Func<object, Task>>());
+        if(!_messageTypes.Contains(messageType))
+            _messageTypes.Add(messageType);
         
-        _handlers[messageType].Add(async (message) => await handler((TMessage)message));
+        if(!_handlers.ContainsKey(messageTypeName))
+            _handlers.Add(messageTypeName, new List<Func<object, Task>>());
+        
+        _handlers[messageTypeName].Add(async (message) => await handler((TMessage)message));
     }
     
     public void SubscribeToCommand<TCommand>(Func<TCommand, Task> handler) where TCommand : ICommand
@@ -111,19 +116,20 @@ public class MessageBus(
             {
                 var body = args.Body.ToArray();
                 var message = Encoding.UTF8.GetString(body);
-                var messageType = args.BasicProperties.Type;
+                var messageTypeName = args.BasicProperties.Type;
 
-                if (!string.IsNullOrEmpty(messageType))
+                if (!string.IsNullOrEmpty(messageTypeName))
                 {
-                    var type = AppDomain.CurrentDomain.GetAssemblies()
-                        .SelectMany(a => a.GetTypes())
-                        .FirstOrDefault(t => t.Name == messageType);
-
-                    if (type != null && _handlers.ContainsKey(type))
+                    var messageType = _messageTypes.SingleOrDefault(t => t.Name == messageTypeName);
+                    
+                    if (messageType != null && _handlers.TryGetValue(messageTypeName, out var handlerList))
                     {
-                        var deserializedMessage = JsonSerializer.Deserialize(message, type);
-                        var tasks = _handlers[type].Select(handler => handler(deserializedMessage));
-                        await Task.WhenAll(tasks);
+                        var deserializedMessage = JsonSerializer.Deserialize(message, messageType);
+                        if (deserializedMessage != null)
+                        {
+                            var tasks = handlerList.Select(handler => handler(deserializedMessage));
+                            await Task.WhenAll(tasks);
+                        }
                     }
                 }
 
