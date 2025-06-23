@@ -54,7 +54,14 @@ public class MessageBus(
         _queueName = $"{_serviceName}.queue";
         
         await _channel.QueueDeclareAsync(_queueName, true, false, false);
-
+        
+        foreach (var type in _handlers.Keys)
+        {
+            var exchangeName = type.Name;
+            await _channel.ExchangeDeclareAsync(exchangeName, ExchangeType.Fanout, true);
+            await _channel.QueueBindAsync(_queueName, exchangeName, "");
+        }
+        
         await SetupConsumerAsync();
     }
 
@@ -81,12 +88,6 @@ public class MessageBus(
 
     public void Subscribe<TMessage>(Func<TMessage, Task> handler) where TMessage : IMessage
     {
-        /*
-        var exchangeName = typeof(TMessage).Name;
-        await _channel.ExchangeDeclareAsync(exchangeName, ExchangeType.Fanout, true);
-        await _channel.QueueBindAsync(_queueName, exchangeName, "");
-        */
-
         var messageType = typeof(TMessage);
         
         if(!_handlers.ContainsKey(messageType))
