@@ -31,10 +31,21 @@ public interface IEvent : IMessage
 {
 }
 
+public interface IMessageBus : IAsyncDisposable
+{
+    Task SendAsync<TMessage>(TMessage message) where TMessage : IMessage;
+    Task SendCommandAsync<TCommand>(TCommand command) where TCommand : ICommand;
+    Task PublishEventAsync<TEvent>(TEvent @event) where TEvent : IEvent;
+    void Subscribe<TMessage>(Func<TMessage, Task> handler) where TMessage : IMessage;
+    void SubscribeToCommand<TCommand>(Func<TCommand, Task> handler) where TCommand : ICommand;
+    void SubscribeToEvent<TEvent>(Func<TEvent, Task> handler) where TEvent : IEvent;
+    Task InitailiseAsync();
+}
+
 public class MessageBus(
     string _serviceName, 
-    string _connectionString = "amqp://guest:guest@localhost:5672" ) 
-    : IAsyncDisposable
+    string _connectionString = "amqp://guest:guest@localhost:5672") 
+    : IMessageBus
 {
     private IConnection _connection;
     private IChannel _channel;
@@ -166,9 +177,9 @@ public record OrderPlacedEvent(Guid OrderId, Guid UserId, decimal Amount) : IEve
 
 public class UserService : IAsyncDisposable
 {
-    private readonly MessageBus _bus;
+    private readonly IMessageBus _bus;
 
-    public UserService(MessageBus bus)
+    public UserService(IMessageBus bus)
     {
         _bus = bus;
         _bus.Subscribe<CreateUserCommand>(HandleCreateUser);
@@ -203,9 +214,9 @@ public class UserService : IAsyncDisposable
 
 public class EmailService : IAsyncDisposable
 {
-    private MessageBus _bus;
+    private IMessageBus _bus;
 
-    public EmailService(MessageBus bus)
+    public EmailService(IMessageBus bus)
     {
         _bus = bus;
         _bus.Subscribe<CreateUserCommand>(HandleCreateUser);
